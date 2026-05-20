@@ -1,55 +1,129 @@
-name: Build
+name: Sync VS2 & Build
+
 on:
-  push:
-    branches:
-      - '1.18.x/*'
-      - '1.19.2/*'
-      - '1.20/*'
-      - '1.20.1/*'
-  pull_request:
-    types: [ opened, synchronize, reopened ]
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: 17
+  TARGET_BRANCH: "1.20.1/playtest"
+  UPSTREAM_URL: "https://github.com/ValkyrienSkies/Valkyrien-Skies-2.git"
+  MOD_PREFIX: "valkyrienskies"
+  R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+  R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+  R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
 jobs:
-  validate-gradle:
-    name: "Validate Gradle wrapper"
+  sync-and-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
-          submodules: true # Clone with vs-core submodule
-      - uses: gradle/actions/wrapper-validation@v3
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
 
-  json-yaml-validate:
-    name: "Validate Json/Yaml files"
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write # enable write permissions for pull request comments
-    steps:
-      - uses: actions/checkout@v4
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream ${{ env.UPSTREAM_URL }}
+          git fetch upstream
 
-      - name: json-yaml-validate
-        id: json-yaml-validate
-        uses: GrantBirki/json-yaml-validate@v2.3.1
+      - name: Determine if Update Needed
+        id: check_update
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "✅ Manual trigger: skipping upstream check, proceeding to build."
+          else
+            UPSTREAM_TIME=$(git log -1 --format=%ct upstream/${{ env.TARGET_BRANCH }})
+            DAY_AGO=$(date -d "24 hours ago" +%s)
+            if [ "$UPSTREAM_TIME" -gt "$DAY_AGO" ]; then
+              echo "has_update=true" >> $GITHUB_OUTPUT
+              echo "✅ Detected upstream updates."
+            else
+              echo "has_update=false" >> $GITHUB_OUTPUT
+              echo "⏭️ No upstream updates in 24h."
+            fi
+          fi
+
+      - name: Sync with Upstream (Merge)
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          git merge upstream/${{ env.TARGET_BRANCH }} -m "chore: sync with upstream"
+
+      - name: Setup Java
+        if: steps.check_update.outputs.has_update == 'true'
+        uses: actions/setup-java@v4
         with:
-          comment: "true" # enable comment mode
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
 
-  # test-server:
-  #   name: Test Server
-  #   strategy:
-  #     matrix:
-  #       serverType: [ 'fabric', 'forge' ]
-  #   runs-on: ubuntu-latest
-  #   timeout-minutes: 20 # Fail after 20 minutes
-  #   steps:
-  #     - name: Shallow Clone (--recurse-submodules)
-  #       uses: actions/checkout@v4
-  #       with:
-  #         submodules: recursive
+      - name: Build Mod (No Cache)
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew clean build --no-build-cache --no-daemon
 
-  #     - name: Setup Gradle & Caches
-  #       uses: "./.github/actions/setup-gradle"
+      - name: Install Rclone
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -q rclone-current-linux-amd64.zip
+          mv rclone-*-linux-amd64/rclone .
+          chmod +x rclone
 
-  #     - name: Test Server
-  #       uses: ValkyrienSkies/Minecraft-Architectury-Testing@v1.9
-  #       with:
-  #         serverType: ${{ matrix.serverType }}
+      - name: Process and Upload
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          # 1. Create Rclone Config
+          mkdir -p ~/.config/rclone
+          CONF_FILE="$HOME/.config/rclone/rclone.conf"
+          echo "[myr2]" > "$CONF_FILE"
+          echo "type = s3" >> "$CONF_FILE"
+          echo "provider = Cloudflare" >> "$CONF_FILE"
+          echo "endpoint = https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" >> "$CONF_FILE"
+          echo "access_key_id = ${R2_ACCESS_KEY}" >> "$CONF_FILE"
+          echo "secret_access_key = ${R2_SECRET_KEY}" >> "$CONF_FILE"
+          echo "region = auto" >> "$CONF_FILE"
+
+          # 2. Upload Function
+          process_and_upload() {
+            local src_path="$1"
+            local loader="$2"
+            local original_filename=$(basename "$src_path")
+            
+            if [[ "$original_filename" == *"-dev-shadow"* ]] || [[ "$original_filename" == *"-sources"* ]]; then
+              echo "⏭️ Skip: $original_filename"
+              return
+            fi
+
+            local target_filename="${MOD_PREFIX}-${loader}.jar"
+            local upload_dir="upload_temp"
+            mkdir -p "$upload_dir"
+            local renamed_path="${upload_dir}/${target_filename}"
+
+            # Rename locally
+            cp "$src_path" "$renamed_path"
+            echo "📝 Renamed: $original_filename -> $target_filename"
+
+            # Upload to bucket root (ending with /)
+            if ./rclone copy "$renamed_path" "myr2:${R2_BUCKET}/" --config "$CONF_FILE" --ignore-checksum --verbose; then
+              echo "✅ Success: $target_filename uploaded."
+            else
+              echo "❌ Failed to upload $target_filename"
+              exit 1
+            fi
+            rm -rf "$upload_dir"
+          }
+
+          # 3. Execute for VS2 structure
+          if [ -d "forge/build/libs" ]; then
+            for f in forge/build/libs/*.jar; do [ -e "$f" ] && process_and_upload "$f" "forge"; done
+          fi
+          if [ -d "fabric/build/libs" ]; then
+            for f in fabric/build/libs/*.jar; do [ -e "$f" ] && process_and_upload "$f" "fabric"; done
+          fi
+          
+          echo "🎉 VS2 Upload Complete."
