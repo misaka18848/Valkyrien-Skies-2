@@ -28,9 +28,6 @@ object VSGameConfig {
         @ConfigCategory(title = "Connectivity")
         val Connectivity = CONNECTIVITY()
 
-        @ConfigCategory(title = "Underwater")
-        val Underwater = UNDERWATER()
-
         @ConfigCategory(title = "Performance")
         val Performance = PERFORMANCE()
 
@@ -78,27 +75,6 @@ object VSGameConfig {
             var enableClientConnectivity = false
         }
 
-        class UNDERWATER {
-            @ConfigEntry(description = "Enable the flat-face overlay of fluids outside of ships")
-            var enableFluidOverlay = true
-
-            @ConfigEntry(description = "Enable the custom fog shader for fluids outside of ships")
-            var enableCustomFluidFog = true
-
-            @ConfigEntry(description = "Fade overlay when camera is in custom fog")
-            var fadeFluidOverlayInCustomFog = true
-
-            //todo: probably data-drive this and lava or just fluids in general
-            @ConfigEntry(description = "Custom water fog density")
-            var waterFogDensity = 0.045f
-
-            @ConfigEntry(description = "Custom lava fog density")
-            var lavaFogDensity = 0.45f
-
-            @ConfigEntry(description = "Custom fog effected by vanilla fog modifiers (Water Breathing, Fire Resist, Conduits)")
-            var fogEffects = true
-        }
-
         class PERFORMANCE {
             @ConfigEntry(
                 description = "Base per-frame time budget, in milliseconds, for applying deferred ship chunk packets on the client.",
@@ -127,12 +103,22 @@ object VSGameConfig {
                 max = 1024.0
             )
             var shipChunkUnloadBatchSize = 64
+
+            @ConfigEntry(
+                description = "Maximum distance (blocks) from the camera at which client particles collide " +
+                    "with ships. Particle-vs-ship collision is purely cosmetic and runs per particle every " +
+                    "tick (convex-polygon collision), so it gets very expensive around large fleets. Particles " +
+                    "beyond this distance skip it (imperceptible). Set to 0 to disable particle-ship collision entirely.",
+                min = 0.0,
+                max = 256.0
+            )
+            var maxParticleShipCollisionDistance = 48
         }
 
         @ConfigEntry(
-            description = "The way ships are rendered by default"
+            description = "The way ships are rendered by default. BATCHED is the built-in default and powers advanced features; VANILLA uses MC's terrain chunk renderer; FLYWHEEL requires the Flywheel mod."
         )
-        var defaultRenderer = ShipRenderer.VANILLA
+        var defaultRenderer = ShipRenderer.BATCHED
 
         @ConfigEntry(description = "Use a custom vanilla shader for rendering ship chunks, improving lighting on tilted and upside down ships. Also enables the directional-shade fix for the sodium/embeddium ship renderer.")
         var betterVanillaShipShading = false
@@ -149,6 +135,16 @@ object VSGameConfig {
     }
 
     class Server {
+        @ConfigCategory(title = "Create")
+        val Create = CREATE()
+
+        class CREATE {
+            @ConfigEntry(
+                description = "Adds contraptions to the ship collider"
+            )
+            var enableContraptionCollisions = false
+        }
+
         @ConfigCategory(title = "FTB Chunks")
         val FTBChunks = FTBCHUNKS()
 
@@ -248,11 +244,25 @@ object VSGameConfig {
             var shipChunkUnwatchTasksPerTick = 256
 
             @ConfigEntry(
-                description = "Maximum number of ship terrain chunks registered with VS core per server level tick.",
+                description = "Minimum number of ship terrain chunks registered with VS core per server level " +
+                    "tick. This acts as the floor of the time-based ingestion budget (see " +
+                    "shipTerrainChunkLoadMillisPerTick): at least this many chunks are processed every tick, " +
+                    "even when the time budget is already exhausted, so terrain ingestion always makes progress.",
                 min = 1.0,
                 max = 4096.0
             )
             var shipTerrainChunkLoadsPerTick = 64
+
+            @ConfigEntry(
+                description = "Wall-clock budget in milliseconds for registering ship terrain chunks with VS " +
+                    "core each server level tick. After the shipTerrainChunkLoadsPerTick floor is met, " +
+                    "ingestion continues until this much time has elapsed. On ticks with headroom this lets " +
+                    "hundreds of chunks activate physics at once instead of serializing large fleets over " +
+                    "many seconds, while overloaded ticks stay bounded near the floor.",
+                min = 0.0,
+                max = 100.0
+            )
+            var shipTerrainChunkLoadMillisPerTick = 2
 
             @ConfigEntry(
                 description = "Maximum number of ship terrain chunks unregistered from VS core per server level tick.",
@@ -260,6 +270,43 @@ object VSGameConfig {
                 max = 4096.0
             )
             var shipTerrainChunkUnloadsPerTick = 64
+
+            @ConfigEntry(
+                description = "Maximum number of ship chunk packets sent to players per server tick. Chunk " +
+                    "watch tasks queue their packet sends and a budgeted drain executes them, so a wave of " +
+                    "chunk-ticket promotions completing in the same tick cannot serialize thousands of chunk " +
+                    "packets in a single tick.",
+                min = 1.0,
+                max = 4096.0
+            )
+            var shipChunkSendsPerTick = 256
+
+            @ConfigEntry(
+                description = "How often (in ticks) the natural-mob-spawn pass runs for each ship. " +
+                    "1 = every spawn cycle (vanilla parity). Higher values stagger ships across ticks " +
+                    "and reduce the per-tick spawning cost of large ships carrying a whole population " +
+                    "(e.g. a village on a ship), at the cost of proportionally slower spawning on ships.",
+                min = 1.0,
+                max = 200.0
+            )
+            var shipMobSpawnIntervalTicks = 1
+
+            @ConfigEntry(
+                description = "Compute per-ship drag/lift debug info every server tick. This data only feeds " +
+                    "the F3+B ship drag/lift debug renderer (singleplayer only), but costs rebuilding two maps " +
+                    "over every loaded ship each tick, so leave it off unless you are debugging ship drag."
+            )
+            var computeDragDebugInfo = false
+
+            @ConfigEntry(
+                description = "EXPERIMENTAL. Load active ship chunks with radius-zero SHIP_CHUNK tickets " +
+                    "(level 33 / FULL) instead of vanilla FORCED tickets (level 31), which avoids the " +
+                    "propagated FULL chunk ring (~25-45 extra loaded chunks per ship). When enabled, " +
+                    "compatibility shims report those FULL-only chunks as ticking and run their block/" +
+                    "random tick pass directly. Leave off unless you are testing the reduced-chunk-footprint " +
+                    "ship loading."
+            )
+            var useRadiusZeroShipChunkTickets = false
         }
 
 
@@ -271,12 +318,6 @@ object VSGameConfig {
                 "than the interact distance check allows."
         )
         var enableInteractDistanceChecks = true
-
-        @ConfigEntry(description = "If true, enables buoyancy from serverside air pockets.")
-        var enablePocketBuoyancy = false
-
-        @ConfigEntry(description = "Buoyancy factor added per cubic meter of air pocket inside a ship")
-        var buoyancyFactorPerPocketVolume = 0.05 // per cubic meter
 
         @ConfigEntry(description = "Force multiplier for flowing fluids pushing ships")
         var fluidWindSpeedScale = 10.0
@@ -322,7 +363,7 @@ object VSGameConfig {
         @ConfigEntry(
             description = "Blast force in newtons of a TNT explosion at the center of the explosion."
         )
-        var explosionBlastForce = 500000.0
+        var explosionBlastForce = 70000.0
 
         @ConfigEntry(
             description = "Allow natural mob spawning on ships"
@@ -379,6 +420,11 @@ object VSGameConfig {
         )
         var defaultSplitGraceTimer = 2
 
+        @ConfigEntry(
+            description = "When a fully-contained vanilla structure is assembled into a ship, move its structure metadata (start + chunk references) onto the ship so in_structure advancements and other structure lookups keep working there."
+        )
+        var relocateStructureMetadata = true
+
         @ConfigCategory(title = "Commands")
         val Commands = COMMANDS()
 
@@ -432,23 +478,13 @@ object VSGameConfig {
                 description = "The permission level required to use the /vs dry command. Must be 0 <= x <= 4"
             )
             var dryShipCommandPerms = 2
+
+            @ConfigEntry(
+                description = "The permission level required to use the /vs apply (force/torque) command. Must be 0 <= x <= 4"
+            )
+            var applyCommandPerms = 2
         }
     }
 
-    class Common {
-        @ConfigEntry(
-            description = "Multiplier for ship pocket flooding speed. `1.0` = current baseline, `0.3333` = ~3x slower flooding."
-        )
-        var shipPocketFloodRateMultiplier = 0.3333333333333333
-
-        @ConfigEntry(
-            description = "Multiplier for ship pocket leak/flood particle velocity."
-        )
-        var shipPocketParticleSpeedMultiplier = 1.0
-
-        @ConfigEntry(
-            description = "Enables ship air pockets. Must be enabled on both client and server."
-        )
-        var enableAirPockets = true
-    }
+    class Common
 }

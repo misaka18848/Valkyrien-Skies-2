@@ -12,6 +12,7 @@ import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.util.BitSet;
 
+import java.util.Set;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL15;
@@ -147,7 +148,7 @@ public class VsWorldFromShipLightStorage {
         populateFromShip(level, ship, null, null);
     }
 
-    public void populateFromShip(LevelAccessor level, ClientShip ship, VsShipEmitterList emitters,
+    public void markShipVoxels(LevelAccessor level, ClientShip ship, VsShipEmitterList emitters,
         VsShipOccluderList occluders) {
         AABBic shipyardAabb = ship.getShipAABB();
         if (shipyardAabb == null) return;
@@ -294,13 +295,18 @@ public class VsWorldFromShipLightStorage {
             }
         }
 
-        // Pass 2: dilate every emitter from this ship through the now-complete
-        // solid bitmap of the same ship. (Solids written by ships processed
-        // earlier this frame are also visible — we emit through the merged
-        // solid grid.) Each emitter does a vanilla-style BFS that decrements
-        // 1 per step and skips solid cells.
+    }
+
+    public void populateFromShip(LevelAccessor level, ClientShip ship, VsShipEmitterList emitters,
+        VsShipOccluderList occluders) {
+        markShipVoxels(level, ship, emitters, occluders);
+        runQueuedBfs(level);
+    }
+
+    public void runQueuedBfs(LevelAccessor level) {
         for (int i = 0; i < pendingEmitterX.size(); i++) {
             bfsLight(
+                    level,
                     pendingEmitterX.getInt(i),
                     pendingEmitterY.getInt(i),
                     pendingEmitterZ.getInt(i),
@@ -310,6 +316,19 @@ public class VsWorldFromShipLightStorage {
         pendingEmitterY.clear();
         pendingEmitterZ.clear();
         pendingEmitterL.clear();
+    }
+
+    public int getBlockLightAt(BlockPos pos) {
+        long sectionPos = SectionPos.asLong(pos);
+        int idx = section2Index.get(sectionPos);
+        if(idx == INVALID) return 0;
+        int ix = (pos.getX() & 0xF) + 1;
+        int iy = (pos.getY() & 0xF) + 1;
+        int iz = (pos.getZ() & 0xF) + 1;
+        int voxelIdx = ix + iz * 18 + iy * 18 * 18;
+        long secPtr = arenaPtr + (long) idx * SECTION_SIZE_BYTES;
+        long lightBytePtr = secPtr + LIGHT_START_BYTES + voxelIdx;
+        return MemoryUtil.memGetByte(lightBytePtr) & 0xF;
     }
 
     /**
@@ -427,7 +446,7 @@ public class VsWorldFromShipLightStorage {
      * {@link #MAX_LIGHT_DILATION} so a glowstone-rich ship can't blow the
      * per-frame budget.
      */
-    private void bfsLight(int sx, int sy, int sz, int startLight) {
+    private void bfsLight(LevelAccessor level, int sx, int sy, int sz, int startLight) {
         if (startLight <= 0) return;
         // Start the BFS at the emitter's full value (so a torch shines as
         // brightly as a torch does). MAX_LIGHT_DILATION (= vanilla's 15) is
@@ -444,6 +463,10 @@ public class VsWorldFromShipLightStorage {
             int z = bfsZ.getInt(head);
             int l = bfsL.getInt(head);
             head++;
+
+            if (isWorldOccluder(level, x, y, z)) {
+                continue;
+            }
 
             int idx = ensureSection(SectionPos.asLong(x >> 4, y >> 4, z >> 4));
             int ix = (x & 15) + 1;
@@ -478,6 +501,11 @@ public class VsWorldFromShipLightStorage {
             bfsX.add(x); bfsY.add(y); bfsZ.add(z + 1); bfsL.add(nl);
             bfsX.add(x); bfsY.add(y); bfsZ.add(z - 1); bfsL.add(nl);
         }
+    }
+
+    private boolean isWorldOccluder(final LevelAccessor level, final int x, final int y, final int z) {
+        scratchBlockPos.set(x, y, z);
+        return level.getBlockState(scratchBlockPos).canOcclude();
     }
 
     /** Allocate or reuse a section for {@code sectionPos}, zeroing it on first
@@ -585,6 +613,8 @@ public class VsWorldFromShipLightStorage {
     public int trackedSectionCount() {
         return section2Index.size();
     }
+
+    public Set<Long> trackedSections() { return Set.copyOf(section2Index.keySet()); }
 
     private void ensureGlObjects() {
         if (sectionsBuffer == 0) sectionsBuffer = GL15.glGenBuffers();

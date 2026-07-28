@@ -5,6 +5,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import java.util.SortedSet;
 
+import me.jellysquid.mods.sodium.client.gl.device.CommandList;
 import net.minecraft.client.Minecraft;
 import me.jellysquid.mods.sodium.client.render.SodiumWorldRenderer;
 import me.jellysquid.mods.sodium.client.render.chunk.RenderSectionManager;
@@ -32,8 +33,10 @@ import org.valkyrienskies.core.api.ships.ClientShip;
 import org.valkyrienskies.mod.common.VSClientGameUtils;
 import org.valkyrienskies.mod.common.VSGameUtilsKt;
 import org.valkyrienskies.mod.common.assembly.SeamlessChunksManager;
+import org.valkyrienskies.mod.common.render.batched.ShipBatchRenderer;
 import org.valkyrienskies.mod.compat.LoadedMods;
 import org.valkyrienskies.mod.compat.LoadedMods.FlywheelVersion;
+import org.valkyrienskies.mod.compat.sodium.SodiumCompat;
 import org.valkyrienskies.mod.mixinducks.mod_compat.sodium.RenderSectionManagerDuck;
 import org.valkyrienskies.mod.mixinducks.mod_compat.sodium.SodiumWorldRendererDuck;
 
@@ -129,6 +132,17 @@ public abstract class MixinSodiumWorldRenderer implements SodiumWorldRendererDuc
         }
     }
 
+    @Inject(
+        method = "renderBlockEntities(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/RenderBuffers;Lit/unimi/dsi/fastutil/longs/Long2ObjectMap;Lnet/minecraft/client/Camera;F)V",
+        at = @At("TAIL")
+    )
+    private void vs$renderBatchedShipBlockEntities(final PoseStack matrices, final RenderBuffers bufferBuilders,
+        final Long2ObjectMap<SortedSet<BlockDestructionProgress>> blockBreakingProgressions, final Camera camera,
+        final float tickDelta, final CallbackInfo ci) {
+        ShipBatchRenderer.INSTANCE.renderBlockEntities(world, matrices, bufferBuilders.bufferSource(), camera,
+            tickDelta);
+    }
+
     @Inject(method = "setupTerrain", at = @At("HEAD"))
     private void preUpdateChunks(final Camera camera, final Viewport viewport, final int frame,
         final boolean spectator, final boolean updateChunksImmediately, final CallbackInfo callbackInfo) {
@@ -138,18 +152,6 @@ public abstract class MixinSodiumWorldRenderer implements SodiumWorldRendererDuc
             this.vs$markShipRenderListsDirty();
         }
         vs$prevFrameHadShips = curFrameHasShips;
-
-        // Populate world-from-ship storage + ship-emitter list BEFORE chunk
-        // rendering. The world FSH samples both during world chunk rendering,
-        // which happens after setupTerrain but before VS's ship pass — so
-        // populating here is the only place the data is ready in time.
-        Minecraft.getInstance().getProfiler().push("vs_world_from_ship_lighting");
-        try {
-            org.valkyrienskies.mod.compat.sodium.SodiumCompat.populateWorldFromShipsForFrame(
-                Minecraft.getInstance().level, viewport);
-        } finally {
-            Minecraft.getInstance().getProfiler().pop();
-        }
     }
 
     @Inject(method = "setupTerrain", at = @At("TAIL"))
@@ -190,5 +192,27 @@ public abstract class MixinSodiumWorldRenderer implements SodiumWorldRendererDuc
                 world.pollLightUpdates();
             }
         }
+    }
+
+    @Inject(
+        method = {"reload", "unloadWorld"},
+        at = @At("HEAD"),
+        remap = false
+    )
+    private void deleteStorages(CallbackInfo ci) {
+        ShipBatchRenderer.INSTANCE.freeAll();
+        SodiumCompat.deleteStorages();
+    }
+
+    @Inject(
+        method = "initRenderer",
+        at = @At("HEAD"),
+        remap = false
+    )
+    private void populateStorage(CommandList commandList, CallbackInfo ci){
+        SodiumCompat.populateWorldFromShipsForFrame(world);
+        SodiumCompat.populateLightSectionStorage(world);
+        SodiumCompat.populateBiomeSectionStorage(world);
+
     }
 }

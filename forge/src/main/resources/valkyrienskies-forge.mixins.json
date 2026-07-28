@@ -7,7 +7,6 @@
     "compat.connectiblechains.MixinChainCollisionEntity",
     "compat.connectiblechains.MixinChainKnotEntity",
     "compat.connectiblechains.MixinChainLink",
-    "compat.create.MixinBlockBreakingKineticTileEntity",
     "compat.create.MixinControlledContraptionEntity",
     "compat.create.client.MixinBlockEntityRenderHelper66",
     "compat.create.client.MixinBlockEntityRenderHelper67",
@@ -25,7 +24,6 @@
     "compat.twilightforest.ChunkGeneratorTwilightMixin",
     "entity.MixinBoat",
     "entity.MixinContainerEntity",
-    "feature.air_pockets.MixinEntityFluidPushing",
     "feature.fix_tp_ships_cross_dimension.MixinLevelChunk",
     "feature.forge_interact.MixinIForge2Player",
     "feature.forge_interact.MixinIForgePlayer",
@@ -41,6 +39,7 @@
   ],
   "client": [
     "client.render.MixinLevelRenderer",
+    "client.render.MixinScreenEffectRenderer",
     "compat.connectiblechains.client.MixinChainKnotEntityRenderer",
     "compat.create.client.MixinChainConveyorBlockEntity",
     "compat.create.client.MixinContraptionHandlerClient",

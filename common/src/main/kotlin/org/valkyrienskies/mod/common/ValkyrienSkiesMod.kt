@@ -5,27 +5,23 @@ import com.fasterxml.jackson.databind.module.SimpleModule
 import net.minecraft.client.Minecraft
 import net.minecraft.core.BlockPos
 import net.minecraft.core.registries.Registries
-import net.minecraft.network.chat.Component
 import net.minecraft.resources.ResourceKey
 import net.minecraft.resources.ResourceLocation
 import net.minecraft.server.MinecraftServer
 import net.minecraft.tags.TagKey
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.EntityType
-import net.minecraft.world.item.CreativeModeTab
 import net.minecraft.world.item.Item
-import net.minecraft.world.item.ItemStack
 import net.minecraft.world.level.block.Block
 import net.minecraft.world.level.block.entity.BlockEntity
 import net.minecraft.world.level.block.entity.BlockEntityType
+import net.minecraft.world.level.levelgen.structure.Structure
 import org.valkyrienskies.core.api.ships.properties.ShipId
 import org.valkyrienskies.core.api.util.GameTickOnly
 import org.valkyrienskies.core.api.util.PhysTickOnly
 import org.valkyrienskies.core.api.world.properties.DimensionId
 import org.valkyrienskies.core.internal.VsiCore
 import org.valkyrienskies.core.internal.VsiCoreClient
-import org.valkyrienskies.mod.air_pockets.client.ShipWaterPocketCurrentShipRenderContext
-import org.valkyrienskies.mod.air_pockets.client.ShipWaterPocketExternalWaterCullRenderContext
 import org.valkyrienskies.mod.api.BlockEntityPhysicsListener
 import org.valkyrienskies.mod.api.EntityPhysicsListener
 import org.valkyrienskies.mod.api.SeatedControllingPlayer
@@ -36,7 +32,6 @@ import org.valkyrienskies.mod.common.blockentity.TestHingeBlockEntity
 import org.valkyrienskies.mod.common.blockentity.TestThrusterBlockEntity
 import org.valkyrienskies.mod.common.entity.ShipMountingEntity
 import org.valkyrienskies.mod.common.entity.VSPhysicsEntity
-import org.valkyrienskies.mod.common.hooks.VSGameEvents
 import org.valkyrienskies.mod.common.jackson.BlockPosDeserializer
 import org.valkyrienskies.mod.common.jackson.BlockPosKeyDeserializer
 import org.valkyrienskies.mod.common.jackson.BlockPosKeySerializer
@@ -49,6 +44,7 @@ import org.valkyrienskies.mod.common.util.SplitHandler
 import org.valkyrienskies.mod.common.util.SplittingDisablerAttachment
 import org.valkyrienskies.mod.mixinducks.client.world.ClientChunkCacheDuck
 import org.valkyrienskies.mod.mixinducks.feature.tickets.PlayerKnownShipsDuck
+import org.valkyrienskies.mod.util.PlatformUtils
 import java.util.ServiceLoader
 import java.util.concurrent.ConcurrentHashMap
 
@@ -84,6 +80,10 @@ object ValkyrienSkiesMod {
         TagKey.create(Registries.BLOCK, ResourceLocation(MOD_ID, "assemble_blacklist"))
 
     @JvmField
+    val STRUCTURE_RELOCATION_BLACKLIST: TagKey<Structure> =
+        TagKey.create(Registries.STRUCTURE, ResourceLocation(MOD_ID, "relocation_blacklist"))
+
+    @JvmField
     val NO_NATURAL_SHIP_SPAWN: TagKey<EntityType<*>> =
         TagKey.create(Registries.ENTITY_TYPE, ResourceLocation(MOD_ID, "no_natural_ship_spawn"))
 
@@ -97,6 +97,15 @@ object ValkyrienSkiesMod {
         loader.findFirst().orElseThrow {
             IllegalStateException("No VSCoreProvider implementation found via ServiceLoader!")
         }
+    }
+
+    @JvmStatic
+    val platformUtils by lazy {
+        ServiceLoader.load(PlatformUtils::class.java, PlatformUtils::class.java.classLoader)
+            .findFirst()
+            .orElseThrow {
+                IllegalStateException("No PlatformUtils implementation found via ServiceLoader!")
+            }
     }
 
     @JvmStatic
@@ -231,23 +240,6 @@ object ValkyrienSkiesMod {
 
     @JvmStatic
     fun initClient() {
-        VSGameEvents.renderShip.on {
-            ShipWaterPocketExternalWaterCullRenderContext.beginShipRender()
-            ShipWaterPocketCurrentShipRenderContext.push(it.ship.id, false)
-        }
-        VSGameEvents.postRenderShip.on {
-            ShipWaterPocketCurrentShipRenderContext.pop()
-            ShipWaterPocketExternalWaterCullRenderContext.endShipRender()
-        }
-
-        VSGameEvents.renderShipSodium.on {
-            ShipWaterPocketExternalWaterCullRenderContext.beginShipRender()
-            ShipWaterPocketCurrentShipRenderContext.push(it.ship.id, true)
-        }
-        VSGameEvents.postRenderShipSodium.on {
-            ShipWaterPocketCurrentShipRenderContext.pop()
-            ShipWaterPocketExternalWaterCullRenderContext.endShipRender()
-        }
     }
 
 }

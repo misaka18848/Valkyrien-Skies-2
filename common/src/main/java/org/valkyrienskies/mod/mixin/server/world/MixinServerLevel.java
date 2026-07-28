@@ -52,7 +52,6 @@ import org.valkyrienskies.mod.common.VS2ChunkAllocator;
 import org.valkyrienskies.mod.common.IShipObjectWorldServerProvider;
 import org.valkyrienskies.mod.common.VSGameUtilsKt;
 import org.valkyrienskies.mod.common.ValkyrienSkiesMod;
-import org.valkyrienskies.mod.common.air_pockets.ShipWaterPocketManager;
 import org.valkyrienskies.mod.common.block.WingBlock;
 import org.valkyrienskies.mod.common.config.DimensionParametersResolver;
 import org.valkyrienskies.mod.common.config.VSGameConfig;
@@ -79,55 +78,35 @@ public abstract class MixinServerLevel implements IShipObjectWorldServerProvider
     public abstract int sectionsToVillage(SectionPos arg);
 
 
-    /**
-     * Allow scheduled ticks and block entity ticking in shipyard chunks that were loaded only to
-     * FULL status through SHIP_CHUNK.
-     *
-     * Forge's Level.tickBlockEntities() calls shouldTickBlocksAt(BlockPos) before ticking each
-     * block entity. Ship chunks use level 33 (FULL) tickets to minimize neighbor loading, but
-     * shouldTickBlocksAt requires level ≤ 32. Without this override, furnaces/hoppers/etc won't
-     * tick on ships.
-     */
-    @Inject(method = "shouldTickBlocksAt(J)Z", at = @At("HEAD"), cancellable = true)
-    private void vs$allowShipyardBlockTicking(long packedPos, CallbackInfoReturnable<Boolean> cir) {
-        // Try both BlockPos and ChunkPos decodings since Forge may use either format
-        int chunkX, chunkZ;
-        // First try BlockPos encoding (used by tickBlockEntities)
-        chunkX = BlockPos.getX(packedPos) >> 4;
-        chunkZ = BlockPos.getZ(packedPos) >> 4;
-        if (org.valkyrienskies.mod.common.VS2ChunkAllocator.INSTANCE.isChunkInShipyardCompanion(chunkX, chunkZ)) {
-            if (chunkSource.getChunkNow(chunkX, chunkZ) != null) {
-                cir.setReturnValue(true);
-                return;
-            }
-        }
-        // Also try ChunkPos encoding (used by LevelTicks for scheduled ticks)
-        chunkX = ChunkPos.getX(packedPos);
-        chunkZ = ChunkPos.getZ(packedPos);
-        if (org.valkyrienskies.mod.common.VS2ChunkAllocator.INSTANCE.isChunkInShipyardCompanion(chunkX, chunkZ)) {
-            if (chunkSource.getChunkNow(chunkX, chunkZ) != null) {
-                cir.setReturnValue(true);
-            }
-        }
-    }
-
-    /**
-     * Allow FULL-only shipyard chunks to pass the LevelTicks tick-processing gate.
-     *
-     * LevelTicks uses isPositionTickingWithEntitiesLoaded as its tickCheck predicate.
-     * This method requires BOTH areEntitiesLoaded() AND isPositionTicking() to be true.
-     * Ship chunks may not have their entity sections loaded through the normal entity
-     * management pipeline, so areEntitiesLoaded() returns false, which prevents ALL
-     * scheduled ticks (repeaters, observers, torches, buttons) from being processed.
-     */
-    @Inject(method = "isPositionTickingWithEntitiesLoaded", at = @At("HEAD"), cancellable = true)
-    private void vs$allowShipyardPositionTicking(long packedPos, CallbackInfoReturnable<Boolean> cir) {
-        int chunkX = ChunkPos.getX(packedPos);
-        int chunkZ = ChunkPos.getZ(packedPos);
-        if (VS2ChunkAllocator.INSTANCE.isChunkInShipyardCompanion(chunkX, chunkZ)) {
-            cir.setReturnValue(true);
-        }
-    }
+//    @Inject(method = "shouldTickBlocksAt(J)Z", at = @At("HEAD"), cancellable = true)
+//    private void vs$allowShipyardBlockTicking(long packedPos, CallbackInfoReturnable<Boolean> cir) {
+//        int chunkX, chunkZ;
+//        chunkX = BlockPos.getX(packedPos) >> 4;
+//        chunkZ = BlockPos.getZ(packedPos) >> 4;
+//        if (org.valkyrienskies.mod.common.VS2ChunkAllocator.INSTANCE.isChunkInShipyardCompanion(chunkX, chunkZ)) {
+//            if (chunkSource.getChunkNow(chunkX, chunkZ) != null) {
+//                cir.setReturnValue(true);
+//                return;
+//            }
+//        }
+//        // Also try ChunkPos encoding (used by LevelTicks for scheduled ticks)
+//        chunkX = ChunkPos.getX(packedPos);
+//        chunkZ = ChunkPos.getZ(packedPos);
+//        if (org.valkyrienskies.mod.common.VS2ChunkAllocator.INSTANCE.isChunkInShipyardCompanion(chunkX, chunkZ)) {
+//            if (chunkSource.getChunkNow(chunkX, chunkZ) != null) {
+//                cir.setReturnValue(true);
+//            }
+//        }
+//    }
+//
+//    @Inject(method = "isPositionTickingWithEntitiesLoaded", at = @At("HEAD"), cancellable = true)
+//    private void vs$allowShipyardPositionTicking(long packedPos, CallbackInfoReturnable<Boolean> cir) {
+//        int chunkX = ChunkPos.getX(packedPos);
+//        int chunkZ = ChunkPos.getZ(packedPos);
+//        if (VS2ChunkAllocator.INSTANCE.isChunkInShipyardCompanion(chunkX, chunkZ)) {
+//            cir.setReturnValue(true);
+//        }
+//    }
 
     // Map from ChunkPos to the list of voxel chunks that chunk owns
     @Unique
@@ -262,9 +241,7 @@ public abstract class MixinServerLevel implements IShipObjectWorldServerProvider
                     new Vector3i(chunkX, worldChunk.getSectionYFromSectionIndex(sectionY), chunkZ);
                 voxelChunkPositions.add(chunkPos);
 
-                if (chunkSection != null && (!chunkSection.hasOnlyAir() ||
-                    ShipWaterPocketManager.hasShipyardAirPocketCellsInSection(thisAsLevel, chunkX, chunkPos.y(),
-                        chunkZ))) {
+                if (chunkSection != null && !chunkSection.hasOnlyAir()) {
                     // Add this chunk to the ground rigid body
                     final VsiTerrainUpdate voxelShapeUpdate =
                         VSGameUtilsKt.toDenseVoxelUpdate(chunkSection, chunkPos, thisAsLevel);
@@ -356,14 +333,18 @@ public abstract class MixinServerLevel implements IShipObjectWorldServerProvider
         // Also mark the chunks as loaded in the ship objects
         final List<VsiTerrainUpdate> voxelShapeUpdates = new ArrayList<>();
         final DistanceManagerAccessor distanceManagerAccessor = (DistanceManagerAccessor) chunkSource.chunkMap.getDistanceManager();
-        final int maxTerrainChunkLoads =
+        final int terrainChunkLoadsFloor =
             Math.max(1, Math.min(4096, VSGameConfig.SERVER.getPerformance().getShipTerrainChunkLoadsPerTick()));
+        final long terrainChunkLoadNanosBudget = 1_000_000L
+            * Math.max(0, Math.min(100, VSGameConfig.SERVER.getPerformance().getShipTerrainChunkLoadMillisPerTick()));
+        final long terrainChunkLoadStartNanos = System.nanoTime();
         final int maxTerrainChunkUnloads =
             Math.max(1, Math.min(4096, VSGameConfig.SERVER.getPerformance().getShipTerrainChunkUnloadsPerTick()));
 
         int loadedChunksThisTick = 0;
         final LongIterator pendingForcedChunkIterator = vs$pendingForcedChunks.iterator();
-        while (pendingForcedChunkIterator.hasNext() && loadedChunksThisTick < maxTerrainChunkLoads) {
+        while (pendingForcedChunkIterator.hasNext() && vs$hasTerrainIngestionBudget(
+            loadedChunksThisTick, terrainChunkLoadsFloor, terrainChunkLoadStartNanos, terrainChunkLoadNanosBudget)) {
             final long chunkPosLong = pendingForcedChunkIterator.nextLong();
             if (vs$knownChunks.containsKey(chunkPosLong)) {
                 pendingForcedChunkIterator.remove();
@@ -386,7 +367,8 @@ public abstract class MixinServerLevel implements IShipObjectWorldServerProvider
         }
 
         for (final ChunkHolder chunkHolder : chunkMapAccessor.callGetChunks()) {
-            if (loadedChunksThisTick >= maxTerrainChunkLoads) {
+            if (!vs$hasTerrainIngestionBudget(
+                loadedChunksThisTick, terrainChunkLoadsFloor, terrainChunkLoadStartNanos, terrainChunkLoadNanosBudget)) {
                 break;
             }
             // Only load chunks that haven't been loaded before, and have a ticket
@@ -446,10 +428,24 @@ public abstract class MixinServerLevel implements IShipObjectWorldServerProvider
 
     }
 
+    @Unique
+    private static final int VS$TERRAIN_INGESTION_HARD_CAP = 4096;
+
+    @Unique
+    private static boolean vs$hasTerrainIngestionBudget(final int loadedChunksThisTick, final int countFloor,
+        final long startNanos, final long nanosBudget) {
+        if (loadedChunksThisTick < countFloor) {
+            return true;
+        }
+        if (loadedChunksThisTick >= VS$TERRAIN_INGESTION_HARD_CAP) {
+            return false;
+        }
+        return System.nanoTime() - startNanos < nanosBudget;
+    }
+
     @Override
     public void removeChunk(final int chunkX, final int chunkZ) {
-        final ChunkPos chunkPos = new ChunkPos(chunkX, chunkZ);
-        vs$knownChunks.remove(chunkPos);
+        vs$knownChunks.remove(ChunkPos.asLong(chunkX, chunkZ));
     }
 
     @Unique

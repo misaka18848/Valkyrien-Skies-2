@@ -24,13 +24,14 @@ import org.joml.Vector3d
 import org.joml.primitives.AABBd
 import org.valkyrienskies.core.api.ships.Ship
 import org.valkyrienskies.mod.common.config.VSGameConfig
-import org.valkyrienskies.mod.common.getShipsIntersecting
+import org.valkyrienskies.mod.common.dimensionId
+import org.valkyrienskies.mod.common.shipObjectWorld
 import org.valkyrienskies.mod.mixin.accessors.world.level.NaturalSpawnerInvoker
 import org.valkyrienskies.mod.mixin.accessors.world.level.NaturalSpawnerSpawnStateInvoker
 
 /**
  * Parallel spawn pass invoked from `NaturalSpawnerMixin`'s TAIL inject after vanilla
- * `NaturalSpawner.spawnForChunk` finishes. For each ship intersecting the world chunk's
+ * `NaturalSpawner.spawnForChunk` finishes. For each loaded ship intersecting the world chunk's
  * vertical column, runs vanilla's `spawnCategoryForPosition` flow in the ship's local cells
  * with biome / structure / difficulty drawn from the ship's world-rendered pos (shipyard
  * chunks aren't in the ticket pipeline; vanilla's `getMobsAt` crashes there). Mob caps are
@@ -52,7 +53,29 @@ object ShipNaturalSpawner {
     ) {
         if (!VSGameConfig.SERVER.allowMobSpawns) return
 
+        val invoker = spawnState as NaturalSpawnerSpawnStateInvoker
         val chunkPos = chunk.pos
+
+        // Perf early-out (algorithmic, independent of the throttle below): `canSpawnForCategory`
+        // depends only on (category, chunkPos) — never on a ship — and is monotonically non-increasing
+        // within this call, because the only thing that mutates the SpawnState here is `afterSpawn`,
+        // which raises mob counts toward the cap; nothing lowers them. Therefore if NO gated category
+        // is under its cap at chunk entry, the per-ship loop below could not spawn anything either.
+        // Bail out BEFORE querying the ship spatial index and iterating every intersecting ship. In a
+        // dense / soaked scene (e.g. 1800 piled ships with caps full) this is the common path and
+        // collapses the whole pass to at most ~7 cheap cap checks per chunk — no spatial query, no ship
+        // iteration. Strictly behavior-identical: the inner loop still performs the same per-ship checks.
+        var anyCategorySpawnable = false
+        for (category in SPAWN_CATEGORIES) {
+            if (categoryGate(category, spawnFriendlies, spawnMonsters, spawnPassive) &&
+                invoker.`vs$canSpawnForCategory`(category, chunkPos)
+            ) {
+                anyCategorySpawnable = true
+                break
+            }
+        }
+        if (!anyCategorySpawnable) return
+
         val column = AABBd(
             chunkPos.minBlockX.toDouble(),
             level.minBuildHeight.toDouble(),
@@ -62,11 +85,21 @@ object ShipNaturalSpawner {
             chunkPos.maxBlockZ + 1.0
         )
 
-        val invoker = spawnState as NaturalSpawnerSpawnStateInvoker
-        for (ship in level.getShipsIntersecting(column)) {
+        // Perf: optionally throttle the per-ship spawn pass. For a large ship carrying a whole
+        // population (a village on a ship), running the full spawn flow for every category every
+        // spawn cycle is a notable per-tick server cost. With an interval > 1 we stagger ships by
+        // id so different ships fire on different ticks (smoothing the spike) and each ship's pass
+        // runs only every Nth cycle. interval == 1 is exact vanilla-parity behavior.
+        val spawnInterval = VSGameConfig.SERVER.Performance.shipMobSpawnIntervalTicks
+        val gameTime = level.gameTime
+
+        for (ship in level.shipObjectWorld.loadedShips.getIntersecting(column, level.dimensionId)) {
+            if (spawnInterval > 1 &&
+                Math.floorMod(gameTime + ship.id, spawnInterval.toLong()) != 0L
+            ) continue
             for (category in SPAWN_CATEGORIES) {
                 if (!categoryGate(category, spawnFriendlies, spawnMonsters, spawnPassive)) continue
-                if (!invoker.`vs$canSpawnForCategory`(category, chunk.pos)) continue
+                if (!invoker.`vs$canSpawnForCategory`(category, chunkPos)) continue
                 trySpawnOnShip(category, ship, level, chunk, spawnState)
             }
         }
@@ -106,6 +139,8 @@ object ShipNaturalSpawner {
             || shipyardZ < shipAABB.minZ() || shipyardZ > shipAABB.maxZ()
         ) return
 
+        if (level.chunkSource.getChunkNow(shipyardX shr 4, shipyardZ shr 4) == null) return
+
         // Vanilla parity: pick Y across the FULL column [minBuildHeight, surfaceY+1] like
         // `getRandomPosWithin`. Restricting to the ship's narrow Y range would 5-20× the
         // per-attempt success rate vs vanilla's wide-Y throw-away spread.
@@ -139,6 +174,12 @@ object ShipNaturalSpawner {
                     j++
                     spawnX += random.nextInt(6) - random.nextInt(6)
                     spawnZ += random.nextInt(6) - random.nextInt(6)
+
+                    if (spawnX < shipAABB.minX() || spawnX > shipAABB.maxX()
+                        || spawnZ < shipAABB.minZ() || spawnZ > shipAABB.maxZ()
+                    ) continue@groupLoop
+                    if (level.chunkSource.getChunkNow(spawnX shr 4, spawnZ shr 4) == null) continue@groupLoop
+
                     mutable.set(spawnX, pickedY, spawnZ)
 
                     val cx = spawnX + 0.5

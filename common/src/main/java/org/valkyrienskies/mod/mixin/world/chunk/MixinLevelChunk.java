@@ -5,7 +5,6 @@ import java.util.HashSet;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Registry;
-import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.FullChunkStatus;
@@ -27,7 +26,6 @@ import net.minecraft.world.level.chunk.storage.ChunkSerializer;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.blending.BlendingData;
 import net.minecraft.world.level.material.Fluid;
-import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.ticks.LevelChunkTicks;
 import org.jetbrains.annotations.NotNull;
 import org.spongepowered.asm.mixin.Final;
@@ -45,11 +43,9 @@ import org.valkyrienskies.mod.common.VS2ChunkAllocator;
 import org.valkyrienskies.mod.common.VSGameUtilsKt;
 import org.valkyrienskies.mod.common.fluid.VanillaFluidFlowWindProvider;
 import org.valkyrienskies.mod.common.util.VSLevelChunk;
-import org.valkyrienskies.mod.mixinducks.feature.air_pockets.ship_water_pockets.LevelChunkDuck;
-import org.valkyrienskies.mod.util.FluidStateManager;
 
 @Mixin(LevelChunk.class)
-public abstract class MixinLevelChunk extends ChunkAccess implements VSLevelChunk, LevelChunkDuck {
+public abstract class MixinLevelChunk extends ChunkAccess implements VSLevelChunk {
     @Unique
     private static final Set<Heightmap.Types> ALL_HEIGHT_MAP_TYPES = new HashSet<>(Arrays.asList((Heightmap.Types.values())));
 
@@ -63,9 +59,6 @@ public abstract class MixinLevelChunk extends ChunkAccess implements VSLevelChun
     @Shadow
     @Mutable
     private LevelChunkTicks<Fluid> fluidTicks;
-
-    @Unique
-    private FluidStateManager.ChunkFluidData fluidData;
 
     /**
      * Allow block entity ticking in shipyard chunks that were loaded only to FULL status.
@@ -107,43 +100,6 @@ public abstract class MixinLevelChunk extends ChunkAccess implements VSLevelChun
         throw new IllegalStateException("This should never be called!");
     }
 
-    @Inject(
-        method = "<init>(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/level/ChunkPos;Lnet/minecraft/world/level/chunk/UpgradeData;Lnet/minecraft/world/ticks/LevelChunkTicks;Lnet/minecraft/world/ticks/LevelChunkTicks;J[Lnet/minecraft/world/level/chunk/LevelChunkSection;Lnet/minecraft/world/level/chunk/LevelChunk$PostLoadProcessor;Lnet/minecraft/world/level/levelgen/blending/BlendingData;)V",
-        at = @At("RETURN")
-    )
-    private void LevelChunk$init(
-        Level level, ChunkPos chunkPos, UpgradeData upgradeData, LevelChunkTicks levelChunkTicks,
-        LevelChunkTicks levelChunkTicks2, long l, LevelChunkSection[] levelChunkSections,
-        PostLoadProcessor postLoadProcessor, BlendingData blendingData, CallbackInfo ci
-    ) {
-        this.fluidData = new FluidStateManager.ChunkFluidData();
-
-        final BlockPos.MutableBlockPos tmpPos = new BlockPos.MutableBlockPos();
-        int sectionIndex = -1;
-        for (final LevelChunkSection section : this.getSections()) {
-            sectionIndex++;
-            if (section == null || section.hasOnlyAir()) {
-                continue;
-            }
-            final int yBase = SectionPos.sectionToBlockCoord(this.getSectionYFromSectionIndex(sectionIndex));
-            for (int x = 0; x < 16; x++) {
-                for (int z = 0; z < 16; z++) {
-                    for (int y = 0; y < 16; y++) {
-                        final FluidState state = section.getFluidState(x, y, z);
-                        if (!state.isEmpty()) {
-                            this.fluidData.setFluidState(tmpPos.set(x, yBase + y, z), state);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @Override
-    public FluidStateManager.ChunkFluidData vs$getFluidData() {
-        return this.fluidData;
-    }
-
     @Inject(method = "setBlockState", at = @At("RETURN"))
     public void postSetBlockState(final BlockPos pos, final BlockState state, final boolean moved,
         final CallbackInfoReturnable<BlockState> cir) {
@@ -158,7 +114,7 @@ public abstract class MixinLevelChunk extends ChunkAccess implements VSLevelChun
             BlockStateInfo.INSTANCE.onSetBlock(level, pos, prevState, state);
             VanillaFluidFlowWindProvider.INSTANCE.markDirty(level, pos, prevState, state);
         });
-        this.fluidData.setFluidState(pos, state.getFluidState());
+        // VS benchmark patch (air pockets removed): per-block fluid snapshot updates are no longer needed.
     }
 
     @Shadow
@@ -184,7 +140,6 @@ public abstract class MixinLevelChunk extends ChunkAccess implements VSLevelChun
             //new LevelChunkSection(registry);
             sections[i] = new LevelChunkSection(registry);
         }
-        this.fluidData.clear();
         this.setLightCorrect(false);
 
         registerTickContainerInLevel((ServerLevel) level);

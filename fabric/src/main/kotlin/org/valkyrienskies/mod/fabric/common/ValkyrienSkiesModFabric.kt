@@ -69,6 +69,7 @@ import org.valkyrienskies.mod.common.command.VSCommands
 import org.valkyrienskies.mod.common.config.ConfigType
 import org.valkyrienskies.mod.common.config.DimensionParametersResolver
 import org.valkyrienskies.mod.common.config.MassDatapackResolver
+import org.valkyrienskies.mod.common.config.SlugDatapackResolver
 import org.valkyrienskies.mod.common.config.VSConfigUpdater
 import org.valkyrienskies.mod.common.config.VSEntityHandlerDataLoader
 import org.valkyrienskies.mod.common.config.VSGameConfig
@@ -83,6 +84,7 @@ import org.valkyrienskies.mod.common.item.PhysicsEntityCreatorItem
 import org.valkyrienskies.mod.common.item.ShipAssemblerItem
 import org.valkyrienskies.mod.common.item.ShipCreatorItem
 import org.valkyrienskies.mod.common.item.ShipRemoverItem
+import org.valkyrienskies.mod.common.item.VSBlockItem
 import org.valkyrienskies.mod.compat.LoadedMods
 import org.valkyrienskies.mod.compat.flywheel.FlywheelCompat
 import org.valkyrienskies.mod.compat.flywheel.ShipEmbeddingManager
@@ -276,6 +278,7 @@ class ValkyrienSkiesModFabric : ModInitializer {
         val loader1 = MassDatapackResolver.loader // the get makes a new instance so get it only once
         val loader2 = VSEntityHandlerDataLoader // the get makes a new instance so get it only once
         val loader3 = DimensionParametersResolver
+        val loader4 = SlugDatapackResolver.loader
         ResourceManagerHelper.get(SERVER_DATA)
             .registerReloadListener(object : IdentifiableResourceReloadListener {
                 override fun getFabricId(): ResourceLocation {
@@ -316,6 +319,26 @@ class ValkyrienSkiesModFabric : ModInitializer {
                     gameExecutor: Executor
                 ): CompletableFuture<Void> {
                     return loader3.reload(
+                        stage, resourceManager, preparationsProfiler, reloadProfiler,
+                        backgroundExecutor, gameExecutor
+                    )
+                }
+            })
+        ResourceManagerHelper.get(SERVER_DATA)
+            .registerReloadListener(object : IdentifiableResourceReloadListener {
+                override fun getFabricId(): ResourceLocation {
+                    return ResourceLocation(ValkyrienSkiesMod.MOD_ID, "vs_slugs")
+                }
+
+                override fun reload(
+                    stage: PreparationBarrier,
+                    resourceManager: ResourceManager,
+                    preparationsProfiler: ProfilerFiller,
+                    reloadProfiler: ProfilerFiller,
+                    backgroundExecutor: Executor,
+                    gameExecutor: Executor
+                ): CompletableFuture<Void> {
+                    return loader4.reload(
                         stage, resourceManager, preparationsProfiler, reloadProfiler,
                         backgroundExecutor, gameExecutor
                     )
@@ -371,6 +394,18 @@ class ValkyrienSkiesModFabric : ModInitializer {
             context.register(ResourceLocation("rendertype_ship_translucent"), DefaultVertexFormat.BLOCK) { shaderInstance: ShaderInstance? ->
                 VSRenderTypes.shipTranslucentShader = shaderInstance
             }
+            context.register(ResourceLocation("rendertype_ship_batched_solid"), DefaultVertexFormat.BLOCK) { shaderInstance: ShaderInstance? ->
+                VSRenderTypes.shipBatchedSolidShader = shaderInstance
+            }
+            context.register(ResourceLocation("rendertype_ship_batched_cutout_mipped"), DefaultVertexFormat.BLOCK) { shaderInstance: ShaderInstance? ->
+                VSRenderTypes.shipBatchedCutoutMippedShader = shaderInstance
+            }
+            context.register(ResourceLocation("rendertype_ship_batched_cutout"), DefaultVertexFormat.BLOCK) { shaderInstance: ShaderInstance? ->
+                VSRenderTypes.shipBatchedCutoutShader = shaderInstance
+            }
+            context.register(ResourceLocation("rendertype_ship_batched_translucent"), DefaultVertexFormat.BLOCK) { shaderInstance: ShaderInstance? ->
+                VSRenderTypes.shipBatchedTranslucentShader = shaderInstance
+            }
         }
 
         VSKeyBindings.clientSetup {
@@ -393,7 +428,7 @@ class ValkyrienSkiesModFabric : ModInitializer {
             BuiltInRegistries.BLOCK, ResourceLocation(ValkyrienSkiesMod.MOD_ID, registryName),
             block
         )
-        val item = BlockItem(block, Properties())
+        val item = VSBlockItem(block, Properties())
         Registry.register(BuiltInRegistries.ITEM, ResourceLocation(ValkyrienSkiesMod.MOD_ID, registryName), item)
         return item
     }

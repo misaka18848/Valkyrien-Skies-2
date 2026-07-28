@@ -53,7 +53,6 @@ import org.valkyrienskies.core.util.expand
 import org.valkyrienskies.mod.common.ValkyrienSkiesMod.ASSEMBLE_BLACKLIST
 import org.valkyrienskies.mod.common.entity.ShipMountedToData
 import org.valkyrienskies.mod.common.entity.ShipMountedToDataProvider
-import org.valkyrienskies.mod.common.air_pockets.ShipWaterPocketManager
 import org.valkyrienskies.mod.common.util.DimensionIdProvider
 import org.valkyrienskies.mod.common.util.EntityDragger.serversidePosition
 import org.valkyrienskies.mod.common.util.EntityShipCollisionUtils
@@ -62,6 +61,7 @@ import org.valkyrienskies.mod.common.util.set
 import org.valkyrienskies.mod.common.util.toJOML
 import org.valkyrienskies.mod.common.util.toJOMLD
 import org.valkyrienskies.mod.common.util.toMinecraft
+import org.valkyrienskies.mod.mixin.accessors.entity.EntityAccessor
 import org.valkyrienskies.mod.mixin.accessors.resource.ResourceKeyAccessor
 import org.valkyrienskies.mod.mixinducks.world.entity.PlayerDuck
 import java.util.function.Consumer
@@ -232,13 +232,16 @@ fun Level?.squaredDistanceBetweenInclShips(
 }
 
 private fun getShipObjectManagingPosImpl(world: Level?, chunkX: Int, chunkZ: Int): LoadedShip? {
-    if (world != null && world.shipObjectWorld.isChunkInShipyard(chunkX, chunkZ, world.dimensionId)) {
-        val ship = world.shipObjectWorld.allShips.getByChunkPos(chunkX, chunkZ, world.dimensionId)
-        if (ship != null) {
-            return world.shipObjectWorld.loadedShips.getById(ship.id)
-        }
-    }
-    return null
+    // Perf: resolve the shipObjectWorld + dimensionId extension getters once. This is one of the
+    // hottest VS calls on the server/render threads; the old body invoked `world.shipObjectWorld`
+    // three times and `world.dimensionId` twice per call (each is a non-trivial instanceof/cast
+    // dispatch). Behavior is identical.
+    if (world == null) return null
+    val sow = world.shipObjectWorld
+    val dim = world.dimensionId
+    if (!sow.isChunkInShipyard(chunkX, chunkZ, dim)) return null
+    val ship = sow.allShips.getByChunkPos(chunkX, chunkZ, dim) ?: return null
+    return sow.loadedShips.getById(ship.id)
 }
 
 /**
@@ -423,8 +426,16 @@ fun ServerLevel?.getShipObjectManagingPos(pos: Vector3dc) =
     getShipObjectManagingPos(pos.x().toInt() shr 4, pos.z().toInt() shr 4)
 
 private fun getShipManagingPosImpl(world: Level?, x: Int, z: Int): Ship? {
-    return if (world != null && world.isChunkInShipyard(x, z)) {
-        world.shipObjectWorld.allShips.getByChunkPos(x, z, world.dimensionId)
+    // Perf: resolve shipObjectWorld + dimensionId once. The old body went through
+    // `world.isChunkInShipyard(x, z)` (which itself reads shipObjectWorld + dimensionId) and then
+    // read both extension getters AGAIN for getByChunkPos. This is among the most frequently called
+    // functions in the whole mod (collision, drag, spawning, rendering all funnel through it), so
+    // halving the per-call getter dispatch is worthwhile. Behavior is identical.
+    if (world == null) return null
+    val sow = world.shipObjectWorld
+    val dim = world.dimensionId
+    return if (sow.isChunkInShipyard(x, z, dim)) {
+        sow.allShips.getByChunkPos(x, z, dim)
     } else {
         null
     }
@@ -481,12 +492,31 @@ fun Entity?.getShipBlockStoodOn(probeDepth: Double): ShipBlock? {
     for (ship in level.getShipsIntersecting(probe)) {
         val w2s = ship.transform.worldToShip
         val local = w2s.transformPosition(foot, Vector3d())
-        val cellPos = BlockPos.containing(local.x, local.y, local.z)
-        if (!level.getBlockState(cellPos).isAir) return ShipBlock(ship, cellPos)
-        // Try one below for fence/slab edge cases.
+        val centerPos = BlockPos.containing(local.x, local.y, local.z)
+        if (!level.getBlockState(centerPos).isAir) return ShipBlock(ship, centerPos)
+        // One cell below for fence/slab edge cases at the foot center.
         val belowLocal = w2s.transformPosition(Vector3d(foot.x, foot.y - 1.0, foot.z))
         val belowPos = BlockPos.containing(belowLocal.x, belowLocal.y, belowLocal.z)
         if (!level.getBlockState(belowPos).isAir) return ShipBlock(ship, belowPos)
+
+        val halfW = this.boundingBox.xsize / 2.0
+        val halfD = this.boundingBox.zsize / 2.0
+        if (halfW <= 0.5 && halfD <= 0.5) continue
+
+        val centerLong = centerPos.asLong()
+        val cornerScratch = Vector3d()
+        val cornerXs = doubleArrayOf(this.x - halfW, this.x + halfW, this.x - halfW, this.x + halfW)
+        val cornerZs = doubleArrayOf(this.z - halfD, this.z - halfD, this.z + halfD, this.z + halfD)
+        var lastSeen = centerLong
+        for (i in 0 until 4) {
+            cornerScratch.set(cornerXs[i], foot.y, cornerZs[i])
+            w2s.transformPosition(cornerScratch)
+            val cornerPos = BlockPos.containing(cornerScratch.x, cornerScratch.y, cornerScratch.z)
+            val cornerLong = cornerPos.asLong()
+            if (cornerLong == centerLong || cornerLong == lastSeen) continue
+            lastSeen = cornerLong
+            if (!level.getBlockState(cornerPos).isAir) return ShipBlock(ship, cornerPos)
+        }
     }
     return null
 }
@@ -669,40 +699,16 @@ fun Ship.toWorldCoordinates(x: Double, y: Double, z: Double, dest: Vector3d = Ve
 fun LevelChunkSection.toDenseVoxelUpdate(chunkPos: Vector3ic, level: Level? = null): VsiTerrainUpdate {
     val update = vsCore.newDenseTerrainUpdateBuilder(chunkPos.x(), chunkPos.y(), chunkPos.z())
     val info = BlockStateInfo.cache
-    val mutablePos = if (level == null) null else BlockPos.MutableBlockPos()
-    val baseX = SectionPos.sectionToBlockCoord(chunkPos.x())
-    val baseY = SectionPos.sectionToBlockCoord(chunkPos.y())
-    val baseZ = SectionPos.sectionToBlockCoord(chunkPos.z())
     for (x in 0..15) {
         for (y in 0..15) {
             for (z in 0..15) {
                 val blockState = getBlockState(x, y, z)
                 val defaultBlockType = info.get(blockState)?.second ?: vsCore.blockTypes.air
-                update.addBlock(
-                    x, y, z,
-                    blockState.resolvePhysicsBlockTypeForAirPocket(
-                        level,
-                        mutablePos?.set(baseX + x, baseY + y, baseZ + z),
-                        defaultBlockType,
-                    )
-                )
+                update.addBlock(x, y, z, defaultBlockType)
             }
         }
     }
     return update.build()
-}
-
-private fun BlockState.resolvePhysicsBlockTypeForAirPocket(
-    level: Level?,
-    blockPos: BlockPos?,
-    defaultBlockType: VsiBlockType,
-): VsiBlockType {
-    if (level == null || blockPos == null || !isAir) return defaultBlockType
-    return if (ShipWaterPocketManager.isShipyardBlockPosInShipAirPocket(level, blockPos)) {
-        vsCore.blockTypes.displacementAir
-    } else {
-        defaultBlockType
-    }
 }
 
 /**
@@ -821,8 +827,9 @@ fun getShipMountedToData(passenger: Entity, partialTicks: Float? = null): ShipMo
     }
     val shipObjectEntityMountedTo =
         passenger.level().getLoadedShipManagingPos(vehicle.position().toJOML()) ?: return null
-    val mountedPosInShip: Vector3dc = vehicle.getPosition(partialTicks ?: 0.0f)
-        .add(0.0, vehicle.passengersRidingOffset + passenger.myRidingOffset, 0.0).toJOML()
+    val offset = Vector3d()
+    (vehicle as EntityAccessor).callPositionRider(passenger) { p, x, y, z -> offset.set(x, y, z).sub(vehicle.position().toJOML()) }
+    val mountedPosInShip: Vector3dc = vehicle.getPosition(partialTicks ?: 0.0f).toJOML().add(offset)
 
     return ShipMountedToData(shipObjectEntityMountedTo, mountedPosInShip)
 }
@@ -876,4 +883,36 @@ fun AABBic.forEach(f: (Int, Int, Int) -> Unit) {
             }
         }
     }
+}
+
+/**
+ * Will attempt to rename the ServerShip to the newSlug,
+ * but if an existing ship is found with that slug it will
+ * append a number like `-1` to the slug to make them unique.
+ * Not technically required, slugs _can_ be duplicated, but
+ * highly recommended.
+ */
+fun ServerShip.safeRenameTo(level: ServerLevel, newSlug: String) {
+    var newSlug = newSlug
+    var safeLimit = 0
+    while (safeLimit < 50) {
+        safeLimit += 1
+        run breaking@ {
+            level.allShips.forEach {
+                if (it.slug == newSlug) {
+                    val suffix = newSlug.split("-").last()
+                    if (suffix.toIntOrNull() != null) {
+                        val newNum = suffix.toInt() + 1
+                        newSlug = newSlug.dropLast(suffix.length)
+                        newSlug += newNum.toString()
+                    } else {
+                        newSlug += "-1"
+                    }
+                    // search all slugs again
+                    return@breaking
+                }
+            }
+        }
+    }
+    this.slug = newSlug
 }
